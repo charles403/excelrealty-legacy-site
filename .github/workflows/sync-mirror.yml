@@ -1,8 +1,21 @@
-# Keeps the legacy-domain mirror (cwh-works/scr-legacy-mirror,
-# serving www.excelrealty.us) identical to this repository.
-# This repo is the single source of truth: edit here, push, and the
-# mirror updates automatically. Requires the MIRROR_TOKEN repo secret
-# (a GitHub token with push access to excelrealty-legacy-site).
+# Keeps the legacy-domain mirror (cwh-works/scr-legacy-mirror, serving
+# www.excelrealty.us) identical to this repository.
+#
+# This repo is the single source of truth: edit here, push, and the mirror
+# updates automatically with its CNAME swapped to the legacy domain.
+#
+# AUTH: the MIRROR_DEPLOY_KEY secret — the PRIVATE half of an ed25519 deploy
+# key whose PUBLIC half is installed on cwh-works/scr-legacy-mirror with
+# write access.
+#
+# This replaced a personal access token (MIRROR_TOKEN) on 2026-07-29. The
+# token had been deleted from the account, so this workflow would have failed
+# on its next run and www.excelrealty.us would have silently stopped
+# updating — the last successful sync was 2026-07-12.
+#
+# A deploy key is the right shape here: it can push to exactly one
+# repository, so a leak cannot reach the rest of the account the way a PAT
+# can, and it does not expire out from under the workflow.
 
 name: Sync legacy domain mirror
 
@@ -18,16 +31,38 @@ jobs:
       - uses: actions/checkout@v4
         with:
           # Don't persist the default GITHUB_TOKEN auth header; it would
-          # override MIRROR_TOKEN on the cross-repo push below.
+          # override the deploy key on the cross-repo push below.
           persist-credentials: false
 
       - name: Point CNAME at the legacy domain
         run: echo "www.excelrealty.us" > CNAME
 
       - name: Push to mirror repository
+        env:
+          DEPLOY_KEY: ${{ secrets.MIRROR_DEPLOY_KEY }}
         run: |
-          git config user.name "shortcreek-sync"
+          set -euo pipefail
+
+          if [ -z "${DEPLOY_KEY:-}" ]; then
+            echo "::error::MIRROR_DEPLOY_KEY secret is missing or empty."
+            echo "::error::www.excelrealty.us will not receive this update."
+            exit 1
+          fi
+
+          # Deliberately no third-party action here — writing the key by hand
+          # keeps this workflow free of any supply-chain dependency for a step
+          # that holds push access to a live site.
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/mirror_key
+          chmod 600 ~/.ssh/mirror_key
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+
+          git config user.name  "shortcreek-sync"
           git config user.email "actions@users.noreply.github.com"
           git add CNAME
-          git commit -m "Sync from shortcreek-realty-site ${GITHUB_SHA::7}"
-          git push --force "https://charles403:${{ secrets.MIRROR_TOKEN }}@github.com/cwh-works/scr-legacy-mirror.git" HEAD:main
+          git commit -m "Sync from scr-transition-site ${GITHUB_SHA::7}"
+
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/mirror_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes" \
+            git push --force git@github.com:cwh-works/scr-legacy-mirror.git HEAD:main
+
+          echo "Mirrored ${GITHUB_SHA::7} to scr-legacy-mirror (www.excelrealty.us)"
